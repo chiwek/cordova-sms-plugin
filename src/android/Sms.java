@@ -21,7 +21,6 @@ import org.json.JSONArray;
 import org.json.JSONException;
 
 public class Sms extends CordovaPlugin {
-
     public final String ACTION_SEND_SMS = "send";
     public final String ACTION_HAS_PERMISSION = "has_permission";
     public final String ACTION_REQUEST_PERMISSION = "request_permission";
@@ -39,11 +38,12 @@ public class Sms extends CordovaPlugin {
     public boolean execute(String action, final JSONArray args, final CallbackContext callbackContext) throws JSONException {
         this.callbackContext = callbackContext;
         this.args = args;
-        if (action.equals(ACTION_SEND_SMS)) {
+
+        if (ACTION_SEND_SMS.equals(action)) {
             boolean isIntent = false;
             try {
-                isIntent = args.getString(2).equalsIgnoreCase("INTENT");
-            } catch (NullPointerException ignored) {}
+                isIntent = "INTENT".equalsIgnoreCase(args.getString(2));
+            } catch (Exception ignored) {}
 
             if (isIntent || hasPermission()) {
                 sendSMS();
@@ -51,13 +51,18 @@ public class Sms extends CordovaPlugin {
                 requestPermission(SEND_SMS_REQ_CODE);
             }
             return true;
-        } else if (action.equals(ACTION_HAS_PERMISSION)) {
-            callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.OK, hasPermission()));
+
+        } else if (ACTION_HAS_PERMISSION.equals(action)) {
+            callbackContext.sendPluginResult(
+                new PluginResult(PluginResult.Status.OK, hasPermission())
+            );
             return true;
-        } else if (action.equals(ACTION_REQUEST_PERMISSION)) {
+
+        } else if (ACTION_REQUEST_PERMISSION.equals(action)) {
             requestPermission(REQUEST_PERMISSION_REQ_CODE);
             return true;
         }
+
         return false;
     }
 
@@ -66,115 +71,154 @@ public class Sms extends CordovaPlugin {
     }
 
     private void requestPermission(int requestCode) {
-        cordova.requestPermission(this, requestCode, android.Manifest.permission.SEND_SMS);
+        cordova.requestPermission(
+            this,
+            requestCode,
+            android.Manifest.permission.SEND_SMS
+        );
     }
 
-    public void onRequestPermissionResult(int requestCode, String[] permissions, int[] grantResults) throws JSONException {
-        for (int r : grantResults) {
-            if (r == PackageManager.PERMISSION_DENIED) {
-                callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.ERROR, "User has denied permission"));
+    @Override
+    public void onRequestPermissionResult(
+        int requestCode,
+        String[] permissions,
+        int[] grantResults
+    ) throws JSONException {
+        for (int result : grantResults) {
+            if (result == PackageManager.PERMISSION_DENIED) {
+                callbackContext.sendPluginResult(
+                    new PluginResult(PluginResult.Status.ERROR, "Permission denied")
+                );
                 return;
             }
         }
+
         if (requestCode == SEND_SMS_REQ_CODE) {
             sendSMS();
-            return;
+        } else {
+            callbackContext.sendPluginResult(
+                new PluginResult(PluginResult.Status.OK, true)
+            );
         }
-        callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.OK, true));
     }
 
     private boolean sendSMS() {
-        cordova.getThreadPool().execute(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    // parse arguments
-                    String separator = ";";
-                    if (Build.MANUFACTURER.equalsIgnoreCase("Samsung")) separator = ",";
+        PluginResult noResult = new PluginResult(PluginResult.Status.NO_RESULT);
+        noResult.setKeepCallback(true);
+        callbackContext.sendPluginResult(noResult);
 
-                    String phoneNumber = args.getJSONArray(0).join(separator).replace("\"", "");
-                    String message = args.getString(1);
-                    String method = args.getString(2);
-                    boolean replaceLineBreaks = Boolean.parseBoolean(args.getString(3));
-
-                    if (replaceLineBreaks) {
-                        message = message.replace("\\n", System.getProperty("line.separator"));
-                    }
-                    if (!checkSupport()) {
-                        callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.ERROR, "SMS not supported on this platform"));
-                        return;
-                    }
-
-                    if (method.equalsIgnoreCase("INTENT")) {
-                        invokeSMSIntent(phoneNumber, message);
-                        callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.OK));
-                    } else {
-                        sendWithDelivery(callbackContext, phoneNumber, message);
-                    }
-                } catch (JSONException ex) {
-                    callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.JSON_EXCEPTION));
+        cordova.getThreadPool().execute(() -> {
+            try {
+                String separator = ";";
+                if (Build.MANUFACTURER.equalsIgnoreCase("Samsung")) {
+                    separator = ",";
                 }
+                String phoneNumber = args
+                    .getJSONArray(0)
+                    .join(separator)
+                    .replace("\"", "");
+                String message = args.getString(1);
+                String method = args.getString(2);
+                boolean replaceLineBreaks = Boolean.parseBoolean(args.getString(3));
+
+                if (replaceLineBreaks) {
+                    message = message.replace(
+                        "\\n",
+                        System.getProperty("line.separator")
+                    );
+                }
+
+                if (!isSmsSupported()) {
+                    callbackContext.sendPluginResult(
+                        new PluginResult(
+                            PluginResult.Status.ERROR,
+                            "SMS not supported"
+                        )
+                    );
+                    return;
+                }
+
+                if ("INTENT".equalsIgnoreCase(method)) {
+                    launchSmsIntent(phoneNumber, message);
+                    callbackContext.sendPluginResult(
+                        new PluginResult(PluginResult.Status.OK)
+                    );
+                } else {
+                    sendWithDelivery(phoneNumber, message);
+                }
+
+            } catch (JSONException e) {
+                callbackContext.sendPluginResult(
+                    new PluginResult(PluginResult.Status.JSON_EXCEPTION)
+                );
             }
         });
         return true;
     }
 
-    private boolean checkSupport() {
-        Activity ctx = this.cordova.getActivity();
-        return ctx.getPackageManager().hasSystemFeature(PackageManager.FEATURE_TELEPHONY);
+    private boolean isSmsSupported() {
+        Activity activity = cordova.getActivity();
+        return activity.getPackageManager().hasSystemFeature(PackageManager.FEATURE_TELEPHONY);
     }
 
     @SuppressLint("NewApi")
-    private void invokeSMSIntent(String phoneNumber, String message) {
-        Intent sendIntent;
-        if ("".equals(phoneNumber) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            String defaultSmsPackageName = Telephony.Sms.getDefaultSmsPackage(this.cordova.getActivity());
-            sendIntent = new Intent(Intent.ACTION_SEND);
-            sendIntent.setType("text/plain");
-            sendIntent.putExtra(Intent.EXTRA_TEXT, message);
-            if (defaultSmsPackageName != null) sendIntent.setPackage(defaultSmsPackageName);
+    private void launchSmsIntent(String phoneNumber, String message) {
+        Intent intent;
+        Activity activity = cordova.getActivity();
+
+        if (phoneNumber.isEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            String defaultPackage = Telephony.Sms.getDefaultSmsPackage(activity);
+            intent = new Intent(Intent.ACTION_SEND);
+            intent.setType("text/plain");
+            intent.putExtra(Intent.EXTRA_TEXT, message);
+            if (defaultPackage != null) {
+                intent.setPackage(defaultPackage);
+            }
         } else {
-            sendIntent = new Intent(Intent.ACTION_VIEW);
-            sendIntent.putExtra("sms_body", message);
-            sendIntent.putExtra("address", phoneNumber);
-            sendIntent.setData(Uri.parse("smsto:" + Uri.encode(phoneNumber)));
+            intent = new Intent(Intent.ACTION_VIEW);
+            intent.putExtra("sms_body", message);
+            intent.putExtra("address", phoneNumber);
+            intent.setData(
+                Uri.parse("smsto:" + Uri.encode(phoneNumber))
+            );
         }
-        this.cordova.getActivity().startActivity(sendIntent);
+
+        activity.startActivity(intent);
     }
 
-    private void sendWithDelivery(final CallbackContext callbackContext, String phoneNumber, String message) {
+    private void sendWithDelivery(String phoneNumber, String message) {
         SmsManager manager = SmsManager.getDefault();
-        final ArrayList<String> parts = manager.divideMessage(message);
+        ArrayList<String> parts = manager.divideMessage(message);
 
-        // SENT broadcast receiver
-        final BroadcastReceiver sentReceiver = new BroadcastReceiver() {
+        String sentAction = INTENT_FILTER_SMS_SENT + UUID.randomUUID().toString();
+        String deliveredAction = INTENT_FILTER_SMS_DELIVERED + UUID.randomUUID().toString();
+
+        Context ctx = cordova.getActivity();
+
+        BroadcastReceiver sentReceiver = new BroadcastReceiver() {
+            int remaining = parts.size();
             boolean anyError = false;
-            int partsCount = parts.size();
+
             @Override
             public void onReceive(Context context, Intent intent) {
-                // keep callback open
                 PluginResult result;
-                switch (getResultCode()) {
-                    case SmsManager.STATUS_ON_ICC_SENT:
-                    case Activity.RESULT_OK:
-                        result = new PluginResult(PluginResult.Status.OK, "SENT");
-                        break;
-                    default:
-                        anyError = true;
-                        result = new PluginResult(PluginResult.Status.ERROR, "SEND_FAILED");
-                        break;
+                int code = getResultCode();
+                if (code == Activity.RESULT_OK || code == SmsManager.STATUS_ON_ICC_SENT) {
+                    result = new PluginResult(PluginResult.Status.OK, "SENT");
+                } else {
+                    anyError = true;
+                    result = new PluginResult(PluginResult.Status.ERROR, "SEND_FAILED");
                 }
                 result.setKeepCallback(true);
                 callbackContext.sendPluginResult(result);
-                partsCount--;
-                if (partsCount == 0) {
-                    context.unregisterReceiver(this);
+                remaining--;
+                if (remaining == 0) {
+                    ctx.unregisterReceiver(this);
                 }
             }
         };
 
-        // DELIVERED broadcast receiver
-        final BroadcastReceiver deliveredReceiver = new BroadcastReceiver() {
+        BroadcastReceiver deliveredReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 PluginResult result;
@@ -185,61 +229,43 @@ public class Sms extends CordovaPlugin {
                 }
                 result.setKeepCallback(true);
                 callbackContext.sendPluginResult(result);
-                context.unregisterReceiver(this);
+                ctx.unregisterReceiver(this);
             }
         };
 
-        // randomize intent actions
-        String sentAction = INTENT_FILTER_SMS_SENT + UUID.randomUUID().toString();
-        String deliveredAction = INTENT_FILTER_SMS_DELIVERED + UUID.randomUUID().toString();
-
-        // register sent receiver
+        IntentFilter filterSent = new IntentFilter(sentAction);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            this.cordova.getActivity().registerReceiver(
-                sentReceiver,
-                new IntentFilter(sentAction),
-                Context.RECEIVER_NOT_EXPORTED
-            );
+            ctx.registerReceiver(sentReceiver, filterSent, Context.RECEIVER_NOT_EXPORTED);
         } else {
-            this.cordova.getActivity().registerReceiver(sentReceiver, new IntentFilter(sentAction));
+            ctx.registerReceiver(sentReceiver, filterSent);
         }
 
-        // register delivered receiver
+        IntentFilter filterDelivered = new IntentFilter(deliveredAction);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            this.cordova.getActivity().registerReceiver(
-                deliveredReceiver,
-                new IntentFilter(deliveredAction),
-                Context.RECEIVER_NOT_EXPORTED
-            );
+            ctx.registerReceiver(deliveredReceiver, filterDelivered, Context.RECEIVER_NOT_EXPORTED);
         } else {
-            this.cordova.getActivity().registerReceiver(deliveredReceiver, new IntentFilter(deliveredAction));
+            ctx.registerReceiver(deliveredReceiver, filterDelivered);
         }
 
-        // create PendingIntents
-        PendingIntent sentPI = PendingIntent.getBroadcast(
-            this.cordova.getActivity(),
-            0,
-            new Intent(sentAction),
-            PendingIntent.FLAG_IMMUTABLE
-        );
-        PendingIntent deliveredPI = PendingIntent.getBroadcast(
-            this.cordova.getActivity(),
-            0,
-            new Intent(deliveredAction),
-            PendingIntent.FLAG_IMMUTABLE
-        );
+        Intent intentSent = new Intent(sentAction);
+        // ensure broadcast targets this app
+        intentSent.setPackage(ctx.getPackageName());
+        PendingIntent piSent = PendingIntent.getBroadcast(ctx, 0, intentSent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent intentDelivered = new Intent(deliveredAction);
+        // ensure broadcast targets this app
+        intentDelivered.setPackage(ctx.getPackageName());
+        PendingIntent piDelivered = PendingIntent.getBroadcast(ctx, 1, intentDelivered, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
-        // send SMS with both intents
         if (parts.size() > 1) {
-            ArrayList<PendingIntent> sentIntents = new ArrayList<>();
-            ArrayList<PendingIntent> deliveryIntents = new ArrayList<>();
+            ArrayList<PendingIntent> listSent = new ArrayList<>();
+            ArrayList<PendingIntent> listDelivered = new ArrayList<>();
             for (int i = 0; i < parts.size(); i++) {
-                sentIntents.add(sentPI);
-                deliveryIntents.add(deliveredPI);
+                listSent.add(piSent);
+                listDelivered.add(piDelivered);
             }
-            manager.sendMultipartTextMessage(phoneNumber, null, parts, sentIntents, deliveryIntents);
+            manager.sendMultipartTextMessage(phoneNumber, null, parts, listSent, listDelivered);
         } else {
-            manager.sendTextMessage(phoneNumber, null, message, sentPI, deliveredPI);
+            manager.sendTextMessage(phoneNumber, null, message, piSent, piDelivered);
         }
     }
 }
